@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.Nullable;
 
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -68,6 +69,7 @@ import com.linecorp.armeria.common.RequestContext;
 import com.linecorp.armeria.common.RpcRequest;
 import com.linecorp.armeria.common.RpcResponse;
 import com.linecorp.armeria.common.SessionProtocol;
+import com.linecorp.armeria.common.grpc.GrpcHeaderNames;
 import com.linecorp.armeria.common.grpc.GrpcSerializationFormats;
 import com.linecorp.armeria.common.logging.RequestLog;
 import com.linecorp.armeria.common.logging.RequestLogAvailability;
@@ -83,7 +85,6 @@ import com.linecorp.armeria.grpc.testing.UnitTestServiceGrpc.UnitTestServiceBloc
 import com.linecorp.armeria.grpc.testing.UnitTestServiceGrpc.UnitTestServiceImplBase;
 import com.linecorp.armeria.grpc.testing.UnitTestServiceGrpc.UnitTestServiceStub;
 import com.linecorp.armeria.internal.PathAndQuery;
-import com.linecorp.armeria.internal.grpc.GrpcHeaderNames;
 import com.linecorp.armeria.internal.grpc.GrpcLogUtil;
 import com.linecorp.armeria.internal.grpc.GrpcTestUtil;
 import com.linecorp.armeria.internal.grpc.StreamRecorder;
@@ -99,6 +100,11 @@ import io.grpc.Status;
 import io.grpc.Status.Code;
 import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.services.ProtoReflectionService;
+import io.grpc.reflection.v1alpha.ServerReflectionGrpc;
+import io.grpc.reflection.v1alpha.ServerReflectionGrpc.ServerReflectionStub;
+import io.grpc.reflection.v1alpha.ServerReflectionRequest;
+import io.grpc.reflection.v1alpha.ServerReflectionResponse;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.netty.util.AsciiString;
@@ -284,17 +290,24 @@ public class GrpcServiceServerTest {
             sb.workerGroup(EventLoopGroups.newEventLoopGroup(1), true);
             sb.defaultMaxRequestLength(0);
 
-            sb.serviceUnder("/", new GrpcServiceBuilder()
-                    .setMaxInboundMessageSizeBytes(MAX_MESSAGE_SIZE)
-                    .addService(new UnitTestServiceImpl())
-                    .enableUnframedRequests(true)
-                    .supportedSerializationFormats(GrpcSerializationFormats.values())
-                    .build()
-                    .decorate(LoggingService.newDecorator())
-                    .decorate((delegate, ctx, req) -> {
-                        ctx.log().addListener(requestLogQueue::add, RequestLogAvailability.COMPLETE);
-                        return delegate.serve(ctx, req);
-                    }));
+            sb.service(
+                    new GrpcServiceBuilder()
+                            .setMaxInboundMessageSizeBytes(MAX_MESSAGE_SIZE)
+                            .addService(new UnitTestServiceImpl())
+                            .enableUnframedRequests(true)
+                            .supportedSerializationFormats(GrpcSerializationFormats.values())
+                            .build(),
+                    service -> service
+                            .decorate(LoggingService.newDecorator())
+                            .decorate((delegate, ctx, req) -> {
+                                ctx.log().addListener(requestLogQueue::add, RequestLogAvailability.COMPLETE);
+                                return delegate.serve(ctx, req);
+                            }));
+            sb.service(
+                    new GrpcServiceBuilder()
+                            .addService(ProtoReflectionService.newInstance())
+                            .build(),
+                    service -> service.decorate(LoggingService.newDecorator()));
         }
     };
 
@@ -377,8 +390,8 @@ public class GrpcServiceServerTest {
                                        .usePlaintext()
                                        .build();
         blockingChannel = ManagedChannelBuilder.forAddress("127.0.0.1", serverWithBlockingExecutor.httpPort())
-                                       .usePlaintext()
-                                       .build();
+                                               .usePlaintext()
+                                               .build();
     }
 
     @AfterClass
@@ -395,7 +408,12 @@ public class GrpcServiceServerTest {
         streamingClient = UnitTestServiceGrpc.newStub(useBlockingExecutor ? blockingChannel : channel);
 
         PathAndQuery.clearCachedPaths();
-        requestLogQueue.clear();
+    }
+
+    @After
+    public void tearDown() {
+        // Make sure all RequestLogs are consumed by the test.
+        assertThat(requestLogQueue).isEmpty();
     }
 
     @Test
@@ -837,6 +855,7 @@ public class GrpcServiceServerTest {
                 GrpcTestUtil.uncompressedFrame(GrpcTestUtil.requestByteBuf())).aggregate().get();
         assertThat(response.headers()).contains(entry(GrpcHeaderNames.GRPC_STATUS, "10"),
                                                 entry(GrpcHeaderNames.GRPC_MESSAGE, "aborted call"));
+        requestLogQueue.take();
     }
 
     @Test
@@ -865,32 +884,68 @@ public class GrpcServiceServerTest {
     }
 
     @Test
-    public void noMaxMessageSize() {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1",
-                                                                  serverWithNoMaxMessageSize.httpPort())
-                                                      .usePlaintext()
-                                                      .build();
+    public void noMaxMessageSize() throws Exception {
+        final ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("127.0.0.1", serverWithNoMaxMessageSize.httpPort())
+                                     .usePlaintext()
+                                     .build();
 
         try {
-            UnitTestServiceBlockingStub stub = UnitTestServiceGrpc.newBlockingStub(channel);
+            final UnitTestServiceBlockingStub stub = UnitTestServiceGrpc.newBlockingStub(channel);
             assertThat(stub.staticUnaryCall(REQUEST_MESSAGE)).isEqualTo(RESPONSE_MESSAGE);
         } finally {
             channel.shutdownNow();
+            requestLogQueue.take();
         }
     }
 
     @Test
-    public void longMaxRequestLimit() {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1",
-                                                                  serverWithLongMaxRequestLimit.httpPort())
-                                                      .usePlaintext()
-                                                      .build();
+    public void longMaxRequestLimit() throws Exception {
+        final ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("127.0.0.1", serverWithLongMaxRequestLimit.httpPort())
+                                     .usePlaintext()
+                                     .build();
         try {
-            UnitTestServiceBlockingStub stub = UnitTestServiceGrpc.newBlockingStub(channel);
+            final UnitTestServiceBlockingStub stub = UnitTestServiceGrpc.newBlockingStub(channel);
             assertThat(stub.staticUnaryCall(REQUEST_MESSAGE)).isEqualTo(RESPONSE_MESSAGE);
         } finally {
             channel.shutdownNow();
+            requestLogQueue.take();
         }
+    }
+
+    @Test
+    public void reflectionService() throws Exception {
+        final ServerReflectionStub stub = ServerReflectionGrpc.newStub(channel);
+
+        final AtomicReference<ServerReflectionResponse> response = new AtomicReference<>();
+
+        final StreamObserver<ServerReflectionRequest> request = stub.serverReflectionInfo(
+                new StreamObserver<ServerReflectionResponse>() {
+                    @Override
+                    public void onNext(ServerReflectionResponse value) {
+                        response.set(value);
+                    }
+
+                    @Override
+                    public void onError(Throwable t) {}
+
+                    @Override
+                    public void onCompleted() {}
+                });
+        request.onNext(ServerReflectionRequest.newBuilder()
+                                              .setListServices("")
+                                              .build());
+        request.onCompleted();
+
+        await().untilAsserted(
+                () -> {
+                    assertThat(response).doesNotHaveValue(null);
+                    // Instead of making this test depend on every other one, just check that there is at least
+                    // two services returned corresponding to UnitTestService and ProtoReflectionService.
+                    assertThat(response.get().getListServicesResponse().getServiceList())
+                            .hasSizeGreaterThanOrEqualTo(2);
+                });
     }
 
     private static void checkRequestLog(RequestLogChecker checker) throws Exception {

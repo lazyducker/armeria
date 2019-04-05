@@ -29,8 +29,12 @@ allprojects {
               }
             }
             </script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlightjs-line-numbers.js/2.3.0/highlightjs-line-numbers.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/highlight.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/languages/gradle.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/languages/protobuf.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/languages/thrift.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/languages/yaml.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlightjs-line-numbers.js/2.6.0/highlightjs-line-numbers.min.js"></script>
             <script>
             // Trim and syntax-highlight the code snippets.
             function trimLines(lines) {
@@ -58,12 +62,6 @@ allprojects {
             }
 
             var hasHljs = typeof hljs !== "undefined";
-            if (hasHljs) {
-              hljs.configure({
-                languages: [ "java", "xml", "json", "yaml", "shell" ]
-              });
-            }
-
             var allPres = document.getElementsByTagName("PRE");
             for (var i in allPres) {
               if (typeof allPres[i].children === "undefined") {
@@ -239,7 +237,9 @@ allprojects {
             if (JavaVersion.current() >= JavaVersion.VERSION_11) {
                 // Javadoc in Java 11+ has more strict checks related with module system,
                 // so we have to use Java 11+ API docs.
-                addOfflineLink('java11', 'https://docs.oracle.com/en/java/javase/11/docs/api/')
+                // However, due to the bug in OpenJDK 11.0.2, we cannot use linksOffline. Just use links.
+                // See https://bugs.java.com/bugdatabase/view_bug.do?bug_id=8212233 for more information
+                links 'https://docs.oracle.com/en/java/javase/11/docs/api/'
             } else {
                 // Javadoc in pre-Java 11 generates a broken link for Java 11+ API docs,
                 // so we have to use Java 10 (or less) API docs.

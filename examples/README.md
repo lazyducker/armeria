@@ -4,6 +4,15 @@
   - Learn how to write an HTTP service using annotations.
   - See [Annotated services](https://line.github.io/armeria/server-annotated-service.html).
 
+- `grpc-service`
+  - Learn how to write a gRPC service with Armeria gRPC module.
+  - See [Running a gRPC service](https://line.github.io/armeria/server-grpc.html) and
+    [Calling a gRPC service](https://line.github.io/armeria/client-grpc.html).
+
+- `proxy-server`
+  - Learn how to make a proxy server which leverages client side load balancing.
+  - See [Client-side load balancing](https://line.github.io/armeria/client-service-discovery.html)
+
 - `saml-service-provider`
   - Learn how to authenticate users using SAML.
   - See [SAML Single Sign-on](https://line.github.io/armeria/advanced-saml.html).

@@ -16,15 +16,13 @@
 
 package com.linecorp.armeria.server;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.linecorp.armeria.server.VirtualHost.ensureHostnamePatternMatchesDefaultHostname;
 import static com.linecorp.armeria.server.VirtualHost.normalizeDefaultHostname;
 import static com.linecorp.armeria.server.VirtualHost.normalizeHostnamePattern;
 import static java.util.Objects.requireNonNull;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.InputStreamReader;
-import java.net.InetAddress;
 import java.nio.charset.Charset;
 import java.security.cert.CertificateException;
 import java.util.ArrayList;
@@ -47,6 +45,7 @@ import com.linecorp.armeria.common.MediaTypeSet;
 import com.linecorp.armeria.common.SessionProtocol;
 import com.linecorp.armeria.common.logging.ContentPreviewer;
 import com.linecorp.armeria.common.logging.ContentPreviewerFactory;
+import com.linecorp.armeria.common.util.SystemInfo;
 import com.linecorp.armeria.internal.ArmeriaHttpUtil;
 import com.linecorp.armeria.internal.annotation.AnnotatedHttpServiceElement;
 import com.linecorp.armeria.internal.annotation.AnnotatedHttpServiceFactory;
@@ -87,45 +86,6 @@ abstract class AbstractVirtualHostBuilder<B extends AbstractVirtualHostBuilder> 
             ApplicationProtocolNames.HTTP_2,
             ApplicationProtocolNames.HTTP_1_1);
 
-    private static final String LOCAL_HOSTNAME;
-
-    static {
-        // Try the '/usr/bin/hostname' command first, which is more reliable.
-        Process process = null;
-        String hostname = null;
-        try {
-            process = Runtime.getRuntime().exec("hostname");
-            final String line = new BufferedReader(new InputStreamReader(process.getInputStream())).readLine();
-            if (line == null) {
-                logger.debug("The 'hostname' command returned nothing; " +
-                             "using InetAddress.getLocalHost() instead");
-            } else {
-                hostname = normalizeDefaultHostname(line.trim());
-                logger.info("Hostname: {} (from 'hostname' command)", hostname);
-            }
-        } catch (Exception e) {
-            logger.debug("Failed to get the hostname using the 'hostname' command; " +
-                         "using InetAddress.getLocalHost() instead", e);
-        } finally {
-            if (process != null) {
-                process.destroy();
-            }
-        }
-
-        if (hostname == null) {
-            try {
-                hostname = normalizeDefaultHostname(InetAddress.getLocalHost().getHostName());
-                logger.info("Hostname: {} (from InetAddress.getLocalHost())", hostname);
-            } catch (Exception e) {
-                hostname = "localhost";
-                logger.warn("Failed to get the hostname using InetAddress.getLocalHost(); " +
-                            "using 'localhost' instead", e);
-            }
-        }
-
-        LOCAL_HOSTNAME = hostname;
-    }
-
     private final String defaultHostname;
     private final String hostnamePattern;
     private final List<ServiceConfig> services = new ArrayList<>();
@@ -145,7 +105,7 @@ abstract class AbstractVirtualHostBuilder<B extends AbstractVirtualHostBuilder> 
      * Creates a new {@link VirtualHostBuilder} whose hostname pattern is {@code "*"} (match-all).
      */
     AbstractVirtualHostBuilder() {
-        this(LOCAL_HOSTNAME, "*");
+        this(SystemInfo.hostname(), "*");
     }
 
     /**
@@ -155,7 +115,7 @@ abstract class AbstractVirtualHostBuilder<B extends AbstractVirtualHostBuilder> 
         hostnamePattern = normalizeHostnamePattern(hostnamePattern);
 
         if ("*".equals(hostnamePattern)) {
-            defaultHostname = LOCAL_HOSTNAME;
+            defaultHostname = SystemInfo.hostname();
         } else if (hostnamePattern.startsWith("*.")) {
             defaultHostname = hostnamePattern.substring(2);
         } else {
@@ -348,25 +308,44 @@ abstract class AbstractVirtualHostBuilder<B extends AbstractVirtualHostBuilder> 
     }
 
     /**
-     * Binds the specified {@link ServiceWithPathMappings} at multiple {@link PathMapping}s.
+     * Decorates and binds the specified {@link ServiceWithPathMappings} at multiple {@link PathMapping}s
+     * of the default {@link VirtualHost}.
+     *
+     * @param serviceWithPathMappings the {@link ServiceWithPathMappings}.
+     * @param decorators the decorator functions, which will be applied in the order specified.
      */
-    public <T extends ServiceWithPathMappings<HttpRequest, HttpResponse>>
-    B service(T serviceWithPathMappings) {
-        return service(serviceWithPathMappings, Function.identity());
+    public B service(ServiceWithPathMappings<HttpRequest, HttpResponse> serviceWithPathMappings,
+                     Iterable<Function<? super Service<HttpRequest, HttpResponse>,
+                                       ? extends Service<HttpRequest, HttpResponse>>> decorators) {
+        requireNonNull(serviceWithPathMappings, "serviceWithPathMappings");
+        requireNonNull(serviceWithPathMappings.pathMappings(), "serviceWithPathMappings.pathMappings()");
+        requireNonNull(decorators, "decorators");
+
+        Service<HttpRequest, HttpResponse> decorated = serviceWithPathMappings;
+        for (Function<? super Service<HttpRequest, HttpResponse>,
+                      ? extends Service<HttpRequest, HttpResponse>> d : decorators) {
+            checkNotNull(d, "decorators contains null: %s", decorators);
+            decorated = d.apply(decorated);
+            checkNotNull(decorated, "A decorator returned null: %s", d);
+        }
+
+        final Service<HttpRequest, HttpResponse> finalDecorated = decorated;
+        serviceWithPathMappings.pathMappings().forEach(pathMapping -> service(pathMapping, finalDecorated));
+        return self();
     }
 
     /**
-     * Decorates and binds the specified {@link ServiceWithPathMappings} at multiple {@link PathMapping}s.
+     * Decorates and binds the specified {@link ServiceWithPathMappings} at multiple {@link PathMapping}s
+     * of the default {@link VirtualHost}.
+     *
+     * @param serviceWithPathMappings the {@link ServiceWithPathMappings}.
+     * @param decorators the decorator functions, which will be applied in the order specified.
      */
-    public <T extends ServiceWithPathMappings<HttpRequest, HttpResponse>,
-            R extends Service<HttpRequest, HttpResponse>>
-    B service(T serviceWithPathMappings, Function<? super T, R> decorator) {
-        requireNonNull(serviceWithPathMappings, "serviceWithPathMappings");
-        requireNonNull(serviceWithPathMappings.pathMappings(), "serviceWithPathMappings.pathMappings()");
-        requireNonNull(decorator, "decorator");
-        final Service<HttpRequest, HttpResponse> decorated = decorator.apply(serviceWithPathMappings);
-        serviceWithPathMappings.pathMappings().forEach(pathMapping -> service(pathMapping, decorated));
-        return self();
+    @SafeVarargs
+    public final B service(ServiceWithPathMappings<HttpRequest, HttpResponse> serviceWithPathMappings,
+                           Function<? super Service<HttpRequest, HttpResponse>,
+                                    ? extends Service<HttpRequest, HttpResponse>>... decorators) {
+        return service(serviceWithPathMappings, ImmutableList.copyOf(requireNonNull(decorators, "decorators")));
     }
 
     /**
@@ -604,7 +583,7 @@ abstract class AbstractVirtualHostBuilder<B extends AbstractVirtualHostBuilder> 
      * </ul>
      * @param length the maximum length of the preview.
      * @param defaultCharset the default charset for a request/response with unspecified charset in
-     *                       {@code "Content-Type"} header.
+     *                       {@code "content-type"} header.
      */
     public B contentPreview(int length, Charset defaultCharset) {
         return contentPreviewerFactory(ContentPreviewerFactory.ofText(length, defaultCharset));
